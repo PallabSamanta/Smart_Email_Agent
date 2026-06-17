@@ -229,6 +229,9 @@ export default function App() {
   
   // Action/Sync States
   const [syncing, setSyncing] = useState(false);
+  const [fetchLimit, setFetchLimit] = useState(150);
+  const listPanelRef = useRef(null);
+  const [showScrollArrow, setShowScrollArrow] = useState(false);
   const [connectingMailType, setConnectingMailType] = useState(''); // '', 'imap', 'google'
   const [imapEmail, setImapEmail] = useState('');
   const [imapHost, setImapHost] = useState('');
@@ -305,6 +308,21 @@ export default function App() {
       if (searchDebounce.current) clearTimeout(searchDebounce.current);
     };
   }, [searchQuery, activeCategory]);
+
+  // Effect to determine if we should show the scroll/load-more arrow initially
+  useEffect(() => {
+    if (listPanelRef.current) {
+      const { scrollTop, scrollHeight, clientHeight } = listPanelRef.current;
+      const isAtBottom = scrollHeight - scrollTop - clientHeight < 45;
+      setShowScrollArrow(isAtBottom);
+    }
+  }, [allEmails, activeCategory]);
+
+  useEffect(() => {
+    if (allEmails.length > fetchLimit) {
+      setFetchLimit(allEmails.length);
+    }
+  }, [allEmails]);
 
   // Initial Auth & Data Check
   useEffect(() => {
@@ -458,12 +476,13 @@ export default function App() {
     }
   };
 
-  const handleSync = async () => {
+  const handleSync = async (limitOverride) => {
     setSyncing(true);
     setSuccessMessage('');
     setErrorMessage('');
+    const currentLimit = limitOverride || fetchLimit;
     try {
-      const data = await apiFetch('/api/sync', { method: 'POST', body: JSON.stringify({}) });
+      const data = await apiFetch('/api/sync', { method: 'POST', body: JSON.stringify({ limit: currentLimit }) });
       setSuccessMessage(`Sync completed! Synced ${data.syncedCount} new emails.`);
       fetchEmails();
       fetchCalendarEvents();
@@ -473,6 +492,21 @@ export default function App() {
     } finally {
       setSyncing(false);
     }
+  };
+
+  const handleListScroll = (e) => {
+    const { scrollTop, scrollHeight, clientHeight } = e.target;
+    // Show arrow if we are close to the bottom (within 45px)
+    const isAtBottom = scrollHeight - scrollTop - clientHeight < 45;
+    setShowScrollArrow(isAtBottom);
+  };
+
+  const handleLoadMore = async () => {
+    if (syncing) return;
+    const currentCount = allEmails.length;
+    const nextLimit = Math.max(fetchLimit, currentCount) + 100;
+    setFetchLimit(nextLimit);
+    await handleSync(nextLimit);
   };
 
   const handleConnectImap = async (e) => {
@@ -929,7 +963,7 @@ export default function App() {
             
             {mailAccounts.length > 0 && (
               <button 
-                onClick={handleSync} 
+                onClick={() => handleSync()} 
                 disabled={syncing}
                 className="btn-primary" 
                 style={{ fontSize: '0.85rem', padding: '8px 16px', marginRight: '12px' }}
@@ -992,7 +1026,12 @@ export default function App() {
         {activeTab === 'inbox' && (
           <div className="split-pane animate-fade-in">
             {/* Left Column: Email List */}
-            <div className="list-panel">
+            <div 
+              className="list-panel"
+              ref={listPanelRef}
+              onScroll={handleListScroll}
+              style={{ position: 'relative' }}
+            >
               {/* Category Filter Chips */}
               <div className="category-tabs" style={{ display: 'flex', gap: '8px', padding: '16px', overflowX: 'auto', borderBottom: '1px solid var(--border-glass)', flexShrink: 0 }}>
                 {['urgent', 'normal', 'promotions', 'social', 'spam'].map(cat => (
@@ -1036,6 +1075,25 @@ export default function App() {
                     </div>
                   ))}
                 </div>
+              )}
+
+              {/* Floating Load More Arrow Button */}
+              {showScrollArrow && (
+                <button
+                  onClick={handleLoadMore}
+                  disabled={syncing}
+                  className="floating-load-more-btn pulse-effect"
+                  title="Load More Emails"
+                >
+                  {syncing ? (
+                    <span className="spinner" style={{ width: '16px', height: '16px' }}></span>
+                  ) : (
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="12" y1="5" x2="12" y2="19"></line>
+                      <polyline points="19 12 12 19 5 12"></polyline>
+                    </svg>
+                  )}
+                </button>
               )}
             </div>
 

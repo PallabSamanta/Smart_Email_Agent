@@ -36,7 +36,7 @@ async function testConnection(config) {
  * @param {number} limit - Maximum number of emails to fetch
  * @returns {Promise<Array<{uid: string, subject: string, from: string, date: Date, body: string, snippet: string}>>}
  */
-async function fetchEmails(config, limit = 50) {
+async function fetchEmails(config, limit = 50, skip = 0) {
   const client = new ImapFlow({
     host: config.host,
     port: parseInt(config.port) || 993,
@@ -61,9 +61,13 @@ async function fetchEmails(config, limit = 50) {
       return [];
     }
 
-    // Fetch the most recent messages (e.g. from total - limit + 1 to total)
-    const startRange = Math.max(1, total - limit + 1);
-    const range = `${startRange}:${total}`;
+    // Fetch the most recent messages excluding the skipped ones
+    const endRange = total - skip;
+    if (endRange <= 0) {
+      return [];
+    }
+    const startRange = Math.max(1, endRange - limit + 1);
+    const range = `${startRange}:${endRange}`;
     
     const emails = [];
     

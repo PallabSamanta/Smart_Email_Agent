@@ -494,7 +494,7 @@ router.get('/api/emails/:id', authMiddleware, async (req, res) => {
 
 // Trigger manual sync
 router.post('/api/sync', authMiddleware, async (req, res) => {
-  const { mailAccountId } = req.body;
+  const { mailAccountId, limit } = req.body;
 
   try {
     const filter = { user_id: req.userId };
@@ -508,10 +508,11 @@ router.post('/api/sync', authMiddleware, async (req, res) => {
     }
 
     let totalSynced = 0;
+    const fetchLimit = limit ? parseInt(limit) : undefined;
 
     for (const account of accounts) {
       try {
-        const result = await emailService.syncMailbox(account);
+        const result = await emailService.syncMailbox(account, fetchLimit);
         totalSynced += result.syncedCount;
       } catch (syncErr) {
         console.error(`Sync failed for mailbox ${account.email}:`, syncErr);

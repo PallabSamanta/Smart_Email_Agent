@@ -105,7 +105,7 @@ function getGmailBody(payload) {
  * @param {object} account - The Mongoose mail_account document
  * @returns {Promise<{syncedCount: number, deletedCount: number}>}
  */
-async function syncMailbox(account) {
+async function syncMailbox(account, limit = 150, mode = 'newest') {
   const mailAccountId = account._id;
   const userId = account.user_id;
   const provider = account.provider;
@@ -141,21 +141,35 @@ async function syncMailbox(account) {
     const gmail = google.gmail({ version: 'v1', auth });
 
     // Fetch message list
-    // Fetch message list
+    const currentCount = await db.Email.countDocuments({ mail_account_id: mailAccountId });
+    const fetchLimit = Math.min(mode === 'older' ? currentCount + limit : limit, 500);
+
+    let query = undefined;
+    if (mode === 'older') {
+      const oldestEmail = await db.Email.findOne({ mail_account_id: mailAccountId })
+        .sort({ received_at: 1 });
+      if (oldestEmail && oldestEmail.received_at) {
+        // Gmail before: query takes epoch in seconds
+        const seconds = Math.floor(new Date(oldestEmail.received_at).getTime() / 1000);
+        query = `before:${seconds}`;
+      }
+    }
+
     const res = await gmail.users.messages.list({
       userId: 'me',
-      maxResults: 150
+      maxResults: fetchLimit,
+      q: query
     });
 
     const messages = res.data.messages || [];
     const fetchedIds = messages.map(m => m.id);
     let deletedCount = 0;
 
-    // Deletion Reconciliation (Gmail)
-    if (fetchedIds.length > 0) {
+    // Deletion Reconciliation (Gmail) - only for newest syncs to avoid purging older synced mails
+    if (mode === 'newest' && fetchedIds.length > 0) {
       const localEmails = await db.Email.find({ mail_account_id: mailAccountId })
         .sort({ received_at: -1 })
-        .limit(100);
+        .limit(limit);
       
       const localIds = localEmails.map(e => e.email_uid);
       const missingIds = localIds.filter(id => !fetchedIds.includes(id));
@@ -238,15 +252,17 @@ async function syncMailbox(account) {
       pass: imapPassword
     };
 
-    const emails = await imapService.fetchEmails(imapConfig, 50);
+    const currentCount = await db.Email.countDocuments({ mail_account_id: mailAccountId });
+    const skip = mode === 'older' ? currentCount : 0;
+    const emails = await imapService.fetchEmails(imapConfig, limit, skip);
     const fetchedUids = emails.map(e => e.uid);
     let deletedCount = 0;
 
-    // Deletion Reconciliation (IMAP)
-    if (fetchedUids.length > 0) {
+    // Deletion Reconciliation (IMAP) - only for newest syncs to avoid purging older synced mails
+    if (mode === 'newest' && fetchedUids.length > 0) {
       const localEmails = await db.Email.find({ mail_account_id: mailAccountId })
         .sort({ received_at: -1 })
-        .limit(100);
+        .limit(limit);
       
       const localUids = localEmails.map(e => e.email_uid);
       const missingUids = localUids.filter(uid => !fetchedUids.includes(uid));
@@ -291,61 +307,109 @@ async function syncMailbox(account) {
       });
     }
   } else if (provider === 'sandbox') {
-    // Sandbox Mock Sync
-    const today = new Date();
-    const tomorrow = new Date(today);
-    tomorrow.setDate(today.getDate() + 1);
+    const currentCount = await db.Email.countDocuments({ mail_account_id: mailAccountId });
     
-    // Format date relative to current time so meeting falls on "tomorrow"
-    const tomorrowDateStr = tomorrow.toLocaleDateString([], { month: 'long', day: 'numeric' });
-    
-    fetchedEmails = [
-      {
-        uid: 'sandbox-1',
-        subject: 'URGENT: Project Sync Meeting Tomorrow 2 PM',
-        from: 'project-manager@mycompany.com',
-        body: `Hi Team,\n\nWe need to sync up tomorrow (${tomorrowDateStr}) at 2:00 PM to finalize the release plan and API documentation.\n\nLet me know if you can make it.\n\nThanks,\nSarah`,
-        snippet: 'We need to sync up tomorrow to finalize the release plan...',
-        receivedAt: new Date(),
-        preClassifiedCategory: null // Let Gemini classify it!
-      },
-      {
-        uid: 'sandbox-2',
-        subject: 'Weekly Team Update & Report',
-        from: 'ceo@mycompany.com',
-        body: 'Hello All,\n\nHere is our weekly summary. Sales are up 12% and engineering has merged the new authentication module. Great job!\n\nBest,\nJohn',
-        snippet: 'Here is our weekly summary. Sales are up 12%...',
-        receivedAt: new Date(Date.now() - 2 * 60 * 60 * 1000), // 2 hours ago
-        preClassifiedCategory: null
-      },
-      {
-        uid: 'sandbox-3',
-        subject: 'Udemy: 90% Off All Web Development Courses Today!',
-        from: 'offers@udemy-marketing.com',
-        body: 'Unlock your potential. Buy courses from $9.99 today. Deal expires in 24 hours. Unsubscribe here.',
-        snippet: 'Unlock your potential. Buy courses from $9.99 today...',
-        receivedAt: new Date(Date.now() - 6 * 60 * 60 * 1000), // 6 hours ago
-        preClassifiedCategory: null
-      },
-      {
-        uid: 'sandbox-4',
-        subject: 'Alice sent you a connection request on LinkedIn',
-        from: 'notifications@linkedin.com',
-        body: "Alice Johnson wants to connect with you. View Alice's profile or accept request.",
-        snippet: 'Alice Johnson wants to connect with you...',
-        receivedAt: new Date(Date.now() - 12 * 60 * 60 * 1000), // 12 hours ago
-        preClassifiedCategory: null
-      },
-      {
-        uid: 'sandbox-5',
-        subject: 'CLAIM YOUR FREE BITCOIN CASH NOW!',
-        from: 'spammer-king@scam-domain.com',
-        body: 'Dear Winner, click this link to claim your 5 BTC prize. Gamble and win!',
-        snippet: 'Dear Winner, click this link to claim...',
-        receivedAt: new Date(Date.now() - 24 * 60 * 60 * 1000), // 1 day ago
-        preClassifiedCategory: null
+    if (mode === 'older') {
+      fetchedEmails = [];
+      const startIdx = currentCount + 1;
+      const endIdx = currentCount + limit;
+      
+      for (let i = startIdx; i <= endIdx; i++) {
+        const daysAgo = 1 + Math.floor(i / 5);
+        const categories = ['normal', 'promotions', 'social', 'spam', 'urgent'];
+        const category = categories[i % categories.length];
+        
+        let subject = '';
+        let body = '';
+        let from = '';
+        
+        if (category === 'urgent') {
+          subject = `URGENT: Action Required on Ticket #${1000 + i}`;
+          from = 'support@ticketing-system.com';
+          body = `Hello,\n\nPlease review Ticket #${1000 + i} immediately. It has been escalated.\n\nRegards,\nSupport Team`;
+        } else if (category === 'promotions') {
+          subject = `Special Offer: Save ${10 + (i % 5) * 10}% on Your Next Order!`;
+          from = 'promo@store-deals.com';
+          body = `Hi Customer,\n\nUse code GET${10 + (i % 5) * 10} at checkout to save big! Unsubscribe here.`;
+        } else if (category === 'social') {
+          subject = `User_${i} started following you`;
+          from = 'no-reply@social-network.com';
+          body = `Hi there,\n\nUser_${i} just started following your profile. check it out!`;
+        } else if (category === 'spam') {
+          subject = `Get Rich Quick! Guaranteed ${100 * i}% return!`;
+          from = 'win-big@spam-alerts.xyz';
+          body = `Hello! You have been selected for a special prize. click here to claim.`;
+        } else {
+          subject = `Project Update Notes - Day ${i}`;
+          from = 'developer@team-projects.com';
+          body = `Hi Team,\n\nHere are the notes for day ${i} of the project. Everything is on schedule.\n\nThanks,\nDev`;
+        }
+
+        fetchedEmails.push({
+          uid: `sandbox-${i}`,
+          subject,
+          from,
+          body,
+          snippet: body.substring(0, 60) + '...',
+          receivedAt: new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000 - (i % 24) * 60 * 60 * 1000),
+          preClassifiedCategory: null
+        });
       }
-    ];
+    } else {
+      // mode === 'newest'
+      const today = new Date();
+      const tomorrow = new Date(today);
+      tomorrow.setDate(today.getDate() + 1);
+      const tomorrowDateStr = tomorrow.toLocaleDateString([], { month: 'long', day: 'numeric' });
+      
+      fetchedEmails = [
+        {
+          uid: 'sandbox-1',
+          subject: 'URGENT: Project Sync Meeting Tomorrow 2 PM',
+          from: 'project-manager@mycompany.com',
+          body: `Hi Team,\n\nWe need to sync up tomorrow (${tomorrowDateStr}) at 2:00 PM to finalize the release plan and API documentation.\n\nLet me know if you can make it.\n\nThanks,\nSarah`,
+          snippet: 'We need to sync up tomorrow to finalize the release plan...',
+          receivedAt: new Date(),
+          preClassifiedCategory: null
+        },
+        {
+          uid: 'sandbox-2',
+          subject: 'Weekly Team Update & Report',
+          from: 'ceo@mycompany.com',
+          body: 'Hello All,\n\nHere is our weekly summary. Sales are up 12% and engineering has merged the new authentication module. Great job!\n\nBest,\nJohn',
+          snippet: 'Here is our weekly summary. Sales are up 12%...',
+          receivedAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+          preClassifiedCategory: null
+        },
+        {
+          uid: 'sandbox-3',
+          subject: 'Udemy: 90% Off All Web Development Courses Today!',
+          from: 'offers@udemy-marketing.com',
+          body: 'Unlock your potential. Buy courses from $9.99 today. Deal expires in 24 hours. Unsubscribe here.',
+          snippet: 'Unlock your potential. Buy courses from $9.99 today...',
+          receivedAt: new Date(Date.now() - 6 * 60 * 60 * 1000),
+          preClassifiedCategory: null
+        },
+        {
+          uid: 'sandbox-4',
+          subject: 'Alice sent you a connection request on LinkedIn',
+          from: 'notifications@linkedin.com',
+          body: "Alice Johnson wants to connect with you. View Alice's profile or accept request.",
+          snippet: 'Alice Johnson wants to connect with you...',
+          receivedAt: new Date(Date.now() - 12 * 60 * 60 * 1000),
+          preClassifiedCategory: null
+        },
+        {
+          uid: 'sandbox-5',
+          subject: 'CLAIM YOUR FREE BITCOIN CASH NOW!',
+          from: 'spammer-king@scam-domain.com',
+          body: 'Dear Winner, click this link to claim your 5 BTC prize. Gamble and win!',
+          snippet: 'Dear Winner, click this link to claim...',
+          receivedAt: new Date(Date.now() - 24 * 60 * 60 * 1000),
+          preClassifiedCategory: null
+        }
+      ];
+    }
   }
 
   // Process and save all new emails in our fetched list
